@@ -1,0 +1,15 @@
+import { describe, expect, it } from 'vitest';
+import ExcelJS from 'exceljs';
+import { businessDate, decimal, parseFile, parseSylk, checkXlsxSize } from '../src/lib/import/parse';
+import { catalog } from '../src/lib/import/catalog';
+import { batchHash } from '../src/lib/import/ingest';
+describe('SAP import contracts',()=>{
+ it('inherits SYLK coordinates from formatting records',()=>{const rows=parseSylk('F;Y1;X1\nC;K"Work center :"\nF;X2\nC;K"AJT_ELEC"\nF;Y2;X1\nC;K"Plant"\nF;X2\nC;K"2000"');expect(rows).toEqual([{row:1,cells:['Work center :','AJT_ELEC']},{row:2,cells:['Plant','2000']}]);});
+ it('keeps blank capacity measurements unavailable',async()=>{const r=await parseFile('capacity','capacity.slk',Buffer.from('F;Y1;X1\nC;K"Work center :"\nF;X2\nC;K"WC01"\nF;Y2;X1\nC;K"Plant"\nF;X2\nC;K"2000"'));expect(r.facts[0].load_percent).toBeNull();expect(r.facts[0].work_center).toBe('WC01');});
+ it('validates numeric and calendar values',()=>{expect(decimal('1,234.50')).toBe('1234.50');expect(decimal(100)).toBe('100');expect(decimal('')).toBeNull();expect(()=>decimal('12,34')).toThrow();expect(businessDate('31.12.2026')).toBe('2026-12-31');expect(()=>businessDate('2026-02-30')).toThrow();});
+ it('preserves leading zeros in CSV IDs',async()=>{const fields=catalog.sales.fields;const values:Record<string,string>={sales_order_id:'0000123',sales_item:'0010',material_id:'0000456',quantity:'12.5',unit:'PC',net_price:'3.2',pricing_date:'2026-10-01'};const csv=fields.map(f=>f.header).join(',')+'\n'+fields.map(f=>values[f.column]??'').join(',');const r=await parseFile('sales','sales.csv',Buffer.from(csv));expect(r.facts[0].sales_order_id).toBe('0000123');expect(r.facts[0].source_row).toBe(2);});
+ it('rejects missing headers',async()=>{await expect(parseFile('sales','sales.csv',Buffer.from('Wrong,Columns\n1,2'))).rejects.toThrow(/missing columns/);});
+ it('rejects unsupported XLSX container and extra populated sheets',async()=>{expect(()=>checkXlsxSize(Buffer.from('not a zip'))).toThrow();const wb=new ExcelJS.Workbook();wb.addWorksheet('A').addRow(['hello']);wb.addWorksheet('B').addRow(['world']);await expect(parseFile('sales','file.xlsx',Buffer.from(await wb.xlsx.writeBuffer()))).rejects.toThrow(/one populated sheet/);});
+ it('makes batch hashes order-independent and source-aware',()=>{const files=[{kind:'sales' as const,hash:'a'},{kind:'production' as const,hash:'b'}],meta={name:'Run',sourceSystem:'SAP',sapClient:'100',extractedAt:null};expect(batchHash(files,meta)).toBe(batchHash([...files].reverse(),meta));expect(batchHash(files,meta)).not.toBe(batchHash(files,{...meta,sapClient:'200'}));});
+ it('ignores parser output and generated IDs when identifying an upload',()=>{const meta={name:'Run',sourceSystem:'SAP',sapClient:'100',extractedAt:null};const files=[{kind:'sales' as const,hash:'a',id:'one',facts:[{sales_order_id:'1'}]},{kind:'production' as const,hash:'b',id:'two',facts:[{order_id:'2'}]}];const regenerated=files.map(f=>({...f,id:'new-'+f.id,facts:[...f.facts]}));expect(batchHash(files,meta)).toBe(batchHash(regenerated,meta));});
+});
