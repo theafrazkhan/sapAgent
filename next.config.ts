@@ -5,6 +5,7 @@ const config: NextConfig = {
   experimental: { useTypeScriptCli: false },
   turbopack: { root: process.cwd() },
   serverExternalPackages: ['pg', 'exceljs', 'minio'],
+  async rewrites(){return [{source:'/backend/:path*',destination:`${process.env.FASTAPI_URL||'http://127.0.0.1:8000'}/:path*`}];},
   async headers() { return [{ source: '/:path*', headers: [
     {key: 'X-Content-Type-Options', value: 'nosniff'},
     {key: 'X-Frame-Options', value: 'DENY'},

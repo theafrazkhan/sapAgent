@@ -5,7 +5,7 @@ export type DataRow=Record<string,string|number|boolean|null>;
 export type Snapshot={id:string;name:string;source_system:string;sap_client:string;extracted_at:string|null;imported_at:string;warnings:string[]};
 export type Source={id:string;kind:string;original_name:string;row_count:number;byte_size:string};
 export type Summary={production_orders:number;planned_orders:number;sales_items:number;missing_components:number;affected_orders:number;pending_requisitions:number;inspection_lots:number;work_centers:number;capacity_measurements:number};
-export type Overview={snapshot:Snapshot|null;snapshots:Snapshot[];sources:Source[];summary:Summary|null;shortages:DataRow[];capacity:DataRow[];limitations:string[]};
+export type Overview={snapshot:Snapshot|null;snapshots:Snapshot[];sources:Source[];summary:Summary|null;shortages:DataRow[];capacity:DataRow[];planned?:DataRow[];requirementSchedule?:DataRow[];materials?:number;charts?:{production:DataRow[];quality:DataRow[];purchasing:DataRow[]};limitations:string[]};
 export const limitations=[
  'Overdue production is unavailable: the exports do not include a planned finish date.',
  'Missing components are SAP-reported flags. Required minus withdrawn is not stock shortage.',
@@ -30,15 +30,22 @@ export async function summaryQuery(db:Db,scope:Scope,id:string):Promise<Summary>
  (SELECT count(*)::int FROM smart_factory.capacity WHERE tenant_id=$1 AND snapshot_id=$2 AND load_percent IS NOT NULL) AS capacity_measurements`,params);
  return counts.rows[0];
 }
-export async function overview(scope:Scope,snapshotId?:string):Promise<Overview>{return scoped(scope,async db=>{
+export async function overview(scope:Scope,snapshotId?:string,summaryOnly=false):Promise<Overview>{return scoped(scope,async db=>{
  const snapshots=(await db.query('SELECT id,name,source_system,sap_client,extracted_at,imported_at,warnings FROM smart_factory.snapshots WHERE tenant_id=$1 ORDER BY imported_at DESC LIMIT 50',[scope.tenantId])).rows as Snapshot[];
  const snapshot=snapshotId?await requireSnapshot(db,scope,snapshotId):snapshots[0]??null;
  if(!snapshot)return{snapshot:null,snapshots,sources:[],summary:null,shortages:[],capacity:[],limitations};
  const summary=await summaryQuery(db,scope,snapshot.id);
  const sources=(await db.query('SELECT id,kind,original_name,row_count,byte_size FROM smart_factory.source_files WHERE tenant_id=$1 AND snapshot_id=$2 ORDER BY kind',[scope.tenantId,snapshot.id])).rows as Source[];
+ if(summaryOnly)return{snapshot,snapshots,sources,summary,shortages:[],capacity:[],limitations};
  const shortages=(await db.query(`SELECT material_id,max(description) AS description,count(*)::int AS flagged_requirements,count(DISTINCT order_id)::int AS affected_orders FROM smart_factory.components WHERE tenant_id=$1 AND snapshot_id=$2 AND missing GROUP BY material_id ORDER BY flagged_requirements DESC,material_id LIMIT 7`,[scope.tenantId,snapshot.id])).rows;
  const capacity=(await db.query('SELECT work_center,plant,period,category,load_percent FROM smart_factory.capacity WHERE tenant_id=$1 AND snapshot_id=$2 AND load_percent IS NOT NULL ORDER BY load_percent DESC,work_center LIMIT 8',[scope.tenantId,snapshot.id])).rows;
- return{snapshot,snapshots,sources,summary,shortages,capacity,limitations};
+ const production=(await db.query("SELECT coalesce(status,'Unspecified') AS label,count(DISTINCT order_id)::int AS value FROM smart_factory.orders WHERE tenant_id=$1 AND snapshot_id=$2 AND kind='production' GROUP BY status ORDER BY value DESC LIMIT 12",[scope.tenantId,snapshot.id])).rows;
+ const quality=(await db.query("SELECT coalesce(status,'Unspecified') AS label,count(DISTINCT lot_id)::int AS value FROM smart_factory.inspections WHERE tenant_id=$1 AND snapshot_id=$2 GROUP BY status ORDER BY value DESC LIMIT 12",[scope.tenantId,snapshot.id])).rows;
+ const purchasing=(await db.query("SELECT CASE WHEN deleted THEN 'Deleted' WHEN closed THEN 'Closed' WHEN purchase_order_id IS NOT NULL THEN 'PO assigned' ELSE 'Awaiting PO' END AS label,count(*)::int AS value FROM smart_factory.procurement WHERE tenant_id=$1 AND snapshot_id=$2 GROUP BY 1 ORDER BY value DESC",[scope.tenantId,snapshot.id])).rows;
+ const planned=(await db.query("SELECT order_id,material_id,description,quantity,unit,start_date,status FROM smart_factory.orders WHERE tenant_id=$1 AND snapshot_id=$2 AND kind='planned' ORDER BY start_date NULLS LAST,order_id LIMIT 6",[scope.tenantId,snapshot.id])).rows;
+ const requirementSchedule=(await db.query("SELECT requirement_date::text AS label,count(*)::int AS value FROM smart_factory.components WHERE tenant_id=$1 AND snapshot_id=$2 AND missing AND requirement_date IS NOT NULL GROUP BY requirement_date ORDER BY requirement_date LIMIT 30",[scope.tenantId,snapshot.id])).rows;
+ const materials=(await db.query("SELECT count(DISTINCT material_id)::int AS n FROM smart_factory.orders WHERE tenant_id=$1 AND snapshot_id=$2 AND kind='planned'",[scope.tenantId,snapshot.id])).rows[0].n;
+ return{snapshot,snapshots,sources,summary,shortages,capacity,planned,requirementSchedule,materials,charts:{production,quality,purchasing},limitations};
 });}
 
 const tables:Record<Section,{table:string;search:string[];sort:string;columns:string}>= {

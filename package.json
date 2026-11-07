@@ -22,7 +22,8 @@
     "storage:check": "node --env-file=.env.local --import tsx scripts/storage-check.ts",
     "ai:check": "node --env-file=.env.local --import tsx scripts/ai-check.ts",
     "db-run": "node --env-file=.env.local --import tsx scripts/database.ts",
-    "jobs": "node --env-file=.env.local --import tsx scripts/ops.ts"
+    "jobs": "node --env-file=.env.local --import tsx scripts/ops.ts",
+    "dev:api": ".venv/bin/python scripts/backend-dev.py"
   },
   "dependencies": {
     "csv-parse": "^6.1.0",

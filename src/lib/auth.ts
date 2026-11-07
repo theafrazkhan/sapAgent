@@ -20,7 +20,9 @@ export async function getScope():Promise<Scope>{
 }
 export function checkOrigin(request:Request){
  const expected=new URL(process.env.APP_URL||'http://localhost:3000').origin;
- if(request.headers.get('origin')!==expected)throw new AppError('Request origin is not allowed',403);
+ const origin=request.headers.get('origin');
+ const localPreview=process.env.APP_MODE==='development'&&process.env.NODE_ENV!=='production'&&['http://localhost:3000','http://127.0.0.1:3000'].includes(expected)&&['http://localhost:3000','http://127.0.0.1:3000'].includes(origin||'');
+ if(origin!==expected&&!localPreview)throw new AppError('Request origin is not allowed',403);
 }
 const buckets=new Map<string,{count:number;expires:number}>();
 export function rateLimit(key:string,limit=20,windowMs=60000){

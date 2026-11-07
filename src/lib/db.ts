@@ -5,7 +5,10 @@ export type Scope = { tenantId: string; userId: string; role: 'admin' | 'viewer'
 const globalDb = globalThis as unknown as { factoryPool?: Pool };
 export function pool() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not configured.');
-  return globalDb.factoryPool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 5, idleTimeoutMillis: 15000, connectionTimeoutMillis: 10000 });
+  const url=new URL(process.env.DATABASE_URL);
+  const tunnel=process.env.APP_MODE==='development' ? Number(process.env.DATABASE_TUNNEL_PORT||0) : 0;
+  const connection=tunnel ? {host:'127.0.0.1',port:tunnel,user:decodeURIComponent(url.username),password:decodeURIComponent(url.password),database:url.pathname.slice(1),ssl:{servername:url.hostname,rejectUnauthorized:true}} : {connectionString:process.env.DATABASE_URL};
+  return globalDb.factoryPool ??= new Pool({ ...connection, max: 5, idleTimeoutMillis: 15000, connectionTimeoutMillis: 10000 });
 }
 export async function scoped<T>(scope: Scope, fn: (db: Db) => Promise<T>): Promise<T> {
   const client = await pool().connect();

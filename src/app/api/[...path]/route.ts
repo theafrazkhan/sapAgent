@@ -7,9 +7,11 @@ import { overview, listRecords, orderDetails, type Section } from '@/lib/service
 import { pool, scoped } from '@/lib/db';
 import { tokenHash } from '@/lib/identity';
 import { kinds, type Kind } from '@/lib/import/catalog';
+import { unpackBundle } from '@/lib/import/bundle';
 import { ingest, type Upload } from '@/lib/import/ingest';
 import { MAX_BATCH_BYTES } from '@/lib/import/parse';
 import { storage, type StorageDriver } from '@/lib/storage';
+import { definitions, executeTool, boundedOutput } from '@/lib/ai/tools';
 import { ask } from '@/lib/ai/chat';
 
 export const runtime='nodejs';
@@ -29,9 +31,12 @@ export async function GET(req:NextRequest,ctx:{params:Promise<{path:string[]}>})
   const path=(await ctx.params).path.join('/');
   if(path==='health')return NextResponse.json({status:'ok',version:'0.1.0-alpha.1'});
   const scope=await getScope(),p=req.nextUrl.searchParams;
+  if(path==='tools')return NextResponse.json({tools:definitions});
   if(path==='session')return NextResponse.json({workspace:scope.tenantName,role:scope.role,development:process.env.DEV_AUTH==='true',model:process.env.OPENAI_MODEL||'gpt-6-luna',aiConfigured:Boolean(process.env.OPENAI_API_KEY),storage:process.env.STORAGE_DRIVER||'local'});
-  if(path==='overview')return NextResponse.json(await overview(scope,p.has('snapshot')?uuid.parse(p.get('snapshot')):undefined));
+  if(path==='overview')return NextResponse.json(await overview(scope,p.has('snapshot')?uuid.parse(p.get('snapshot')):undefined,p.get('phase')==='summary'));
   const snapshotId=uuid.parse(p.get('snapshot'));
+  if(path==='conversations')return NextResponse.json(await scoped(scope,async db=>(await db.query(`SELECT c.id,c.created_at,(SELECT content FROM smart_factory.messages m WHERE m.tenant_id=c.tenant_id AND m.conversation_id=c.id AND role='user' ORDER BY created_at LIMIT 1) AS title FROM smart_factory.conversations c WHERE c.tenant_id=$1 AND c.snapshot_id=$2 AND c.user_id=$3 ORDER BY c.created_at DESC LIMIT 30`,[scope.tenantId,snapshotId,scope.userId])).rows));
+  if(path==='conversation'){const id=uuid.parse(p.get('id'));return NextResponse.json(await scoped(scope,async db=>{const owner=await db.query('SELECT id FROM smart_factory.conversations WHERE tenant_id=$1 AND snapshot_id=$2 AND user_id=$3 AND id=$4',[scope.tenantId,snapshotId,scope.userId,id]);if(!owner.rowCount)throw new AppError('Conversation not found',404);return(await db.query('SELECT role,content AS text,evidence AS sources FROM smart_factory.messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at,id',[scope.tenantId,id])).rows;}));}
   if(path==='records'){
    const section=z.enum(['orders','components','procurement','inspections','capacity','sales']).parse(p.get('section')) as Section;
    return NextResponse.json(await listRecords(scope,snapshotId,{section,query:z.string().max(120).parse(p.get('q')||''),kind:p.has('kind')?z.enum(['production','planned']).parse(p.get('kind')):undefined,missingOnly:p.get('missing')==='true',offset:z.coerce.number().int().min(0).max(250000).parse(p.get('offset')||0),limit:25}));
@@ -56,19 +61,21 @@ export async function POST(req:NextRequest,ctx:{params:Promise<{path:string[]}>}
   }
   const scope=await getScope();
   if(path==='logout'){const token=(await cookies()).get(sessionCookie)?.value;if(token)await pool().query('DELETE FROM smart_factory.sessions WHERE token_hash=$1',[tokenHash(token)]);const res=NextResponse.json({ok:true});res.cookies.delete(sessionCookie);return res;}
+  if(path==='tools/execute'){const b=z.object({snapshotId:uuid,name:z.string(),arguments:z.unknown()}).strict().parse(await jsonBody(req));rateLimit(`tools:${scope.tenantId}:${scope.userId}`,60);return NextResponse.json(JSON.parse(boundedOutput(await executeTool(scope,b.snapshotId,b.name,b.arguments))));}
   if(path==='upload'){
    if(scope.role!=='admin')throw new AppError('Admin access required',403);rateLimit(`upload:${scope.tenantId}`,5,60000);
    const body=await limitedBody(req,MAX_BATCH_BYTES+1024*1024);
    const form=await new Response(new Uint8Array(body),{headers:{'content-type':req.headers.get('content-type')||''}}).formData();
    const meta=z.object({name:z.string().trim().min(1).max(120),sourceSystem:z.string().trim().min(1).max(80),sapClient:z.string().trim().min(1).max(20),extractedAt:z.string().datetime().nullable()}).parse({name:form.get('name'),sourceSystem:form.get('sourceSystem'),sapClient:form.get('sapClient'),extractedAt:form.get('extractedAt')||null});
-   const files:Upload[]=[];
-   for(const kind of kinds){const entries=form.getAll(kind);if(entries.length!==1||!(entries[0] instanceof File))throw new AppError(`Select one ${kind} export`);const file=entries[0];files.push({kind:kind as Kind,name:file.name,bytes:Buffer.from(await file.arrayBuffer())});}
+   const bundle=form.get('bundle');
+   const files:Upload[]=bundle instanceof File?await unpackBundle(Buffer.from(await bundle.arrayBuffer())):[];
+   if(!(bundle instanceof File))for(const kind of kinds){const entries=form.getAll(kind);if(entries.length!==1||!(entries[0] instanceof File))throw new AppError(`Select one ${kind} export`);const file=entries[0];files.push({kind:kind as Kind,name:file.name,bytes:Buffer.from(await file.arrayBuffer())});}
    return NextResponse.json(await ingest(scope,files,meta),{status:201});
   }
   if(path==='chat'){
    rateLimit(`chat:${scope.tenantId}:${scope.userId}`,10);
    const b=z.object({snapshotId:uuid,message:z.string().trim().min(1).max(3000),conversationId:uuid.optional()}).strict().parse(await jsonBody(req));
-   return NextResponse.json(await ask(scope,b.snapshotId,b.message,b.conversationId));
+   return NextResponse.json(await ask(scope,b.snapshotId,b.message,b.conversationId,req.headers.get('cookie')||undefined));
   }
   throw new AppError('Endpoint not found',404);
  }catch(e){return failed(e);}
